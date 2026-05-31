@@ -1,0 +1,64 @@
+registry:
+  name: northstar-models
+
+  stages:
+    - name: staging
+      promoted_from: successful training run (eval_report.json generated)
+      promotion_rule: automatic
+      gates:
+        - eta: MAE on frozen holdout set <= 5 minutes (overall)
+        - eta: p95 inference latency <= 150ms on 200 RPS load test
+        - eta: per-city MAE <= 7 minutes on the 3 lowest-volume cities
+        - dispatcher: Macro F1 on frozen eval set >= 0.82
+        - dispatcher: per-zone F1 >= 0.70 on the 3 lowest-volume zones
+        - dispatcher: p95 inference latency <= 80ms on 50 RPS load test
+        - all: no data leakage detected (eval set dates strictly after train set cutoff)
+        - all: unit tests green (pytest exit code 0)
+        - all: docker image vulnerability scan — no CRITICAL CVEs
+
+    - name: production
+      promoted_from: staging
+      promotion_rule: manual
+      gates:
+        - eta: MAE on frozen holdout set <= 4 minutes (stricter than staging)
+        - eta: per-city MAE <= 6 minutes on the 3 lowest-volume cities
+        - eta: successful canary — 10% traffic for 24h, prediction drift PSI < 0.2, error rate < 0.1%
+        - dispatcher: Macro F1 >= 0.84 on frozen eval set
+        - dispatcher: per-zone F1 >= 0.72 on the 3 lowest-volume zones
+        - dispatcher: successful canary — 10% traffic for 48h, PSI < 0.2, error rate < 0.1%
+        - all: canary rollout report reviewed and signed off
+      approvers:
+        - ml-lead
+        - ops-engineer
+
+    - name: archived
+      promoted_from: production (triggered automatically when a newer version is promoted to production)
+
+  retention_policy:
+    max_versions_per_stage: 10
+    applies_to: all models
+
+models:
+  - name: eta
+    owner: ml-team
+    inference_type: online
+    target_rps: 200
+    retrain_schedule: "0 6 * * 1/14"  # every 2 weeks, Monday 06:00 UTC
+    sla_p95_ms: 150
+    retention_versions: 10
+
+  - name: dispatcher-routing
+    owner: ml-team
+    inference_type: online
+    target_rps: 50
+    retrain_schedule: "0 6 1 * *"  # first day of every month, 06:00 UTC
+    sla_p95_ms: 80
+    retention_versions: 10
+
+lineage:
+  required_fields:
+    - git_sha          # exact commit that produced the training code
+    - dataset_hash     # SHA-256 of the serialised training + eval split manifest
+    - docker_image_digest  # sha256 digest of the training Docker image
+    - training_run_id  # unique ID for the training job (UUID)
+    - eval_report_uri  # S3 URI to the frozen evaluation report JSON
